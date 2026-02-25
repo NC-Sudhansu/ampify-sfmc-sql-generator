@@ -1,9 +1,16 @@
-from dotenv import load_dotenv
 import os
 from groq import Groq
 import streamlit as st
 
-load_dotenv()
+# Works on both local (.env) and Streamlit Cloud (st.secrets)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Get API key — Streamlit Cloud first, then .env
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
 
 st.set_page_config(
     page_title="AMPify — SFMC SQL Generator",
@@ -102,7 +109,7 @@ textarea:focus {
 # ─────────────────────────────────────────
 # GROQ CLIENT
 # ─────────────────────────────────────────
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = Groq(api_key=GROQ_API_KEY)
 
 # ─────────────────────────────────────────
 # SFMC KNOWLEDGE BASE
