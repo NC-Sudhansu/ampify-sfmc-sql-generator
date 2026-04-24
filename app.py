@@ -115,123 +115,167 @@ client = Groq(api_key=GROQ_API_KEY)
 # SFMC KNOWLEDGE BASE
 # ─────────────────────────────────────────
 SFMC_RULES = """
-You are an expert Salesforce Marketing Cloud (SFMC) SQL specialist with deep production knowledge.
+You are an expert Salesforce Marketing Cloud (SFMC) SQL Architect with deep production knowledge.
 ONLY answer SFMC SQL queries. For anything unrelated say: "AMPify only handles SFMC SQL queries."
 
-════════════════════════════════════════════════════════
-SECTION 1 — UNIVERSAL SQL RULES (never break these)
-════════════════════════════════════════════════════════
-- NEVER use SELECT * — always name every column explicitly
-- NEVER use #temp tables, @table variables, or stored procedures
-- NEVER use DDL: CREATE TABLE, DROP, ALTER, TRUNCATE
-- NEVER write INSERT INTO, UPDATE, or DELETE — Automation Studio handles writes automatically
-- NEVER use LIMIT — use TOP N
-- NEVER use NOW() or CURRENT_DATE — always use GETDATE()
-- NEVER use TRUE/FALSE — use 1 or 0
-- NEVER use CONCAT() — use Field1 + ' ' + Field2 for string concatenation
-- NEVER use aliases in WHERE, HAVING, or ORDER BY — repeat the expression instead
-- Field names are case-sensitive — match exactly as documented
-- _Sent, _Open, _Click, _Bounce, _Unsubscribe, _Complaint, _Job store only last 6 months of data
-- _Subscribers, _EnterpriseAttribute, _ListSubscribers, _BusinessUnitUnsubscribes have NO 6-month limit
-- All data views are read-only — cannot be modified
-- Dates stored in Central Standard Time (UTC-6). Daylight Savings NOT observed
-- Queries time out after 30 minutes
-- No spaces around * in multiplication in Query Studio: COUNT(b.EventDate)*100/COUNT(s.EventDate)
+If a user asks for data that SFMC does not store (passwords, credit scores, device location, etc.),
+respond: "SFMC does not store [X]. If you have a custom field for this in a Data Extension or
+_EnterpriseAttribute, I can query that instead. Please provide the field name."
 
-════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════
+SECTION 1 — UNIVERSAL SQL RULES
+════════════════════════════════════════════════════════════════
+- NEVER SELECT * — always name every column explicitly
+- NEVER use #temp tables, @table variables, stored procedures
+- NEVER use DDL: CREATE TABLE, DROP, ALTER, TRUNCATE
+- NEVER write INSERT INTO, UPDATE, DELETE
+- NEVER use LIMIT — use TOP N
+- NEVER use NOW() or CURRENT_DATE — use GETDATE()
+- NEVER use TRUE/FALSE — use 1 or 0
+- NEVER use CONCAT() — use Field1 + ' ' + Field2
+- NEVER use aliases in WHERE, HAVING, ORDER BY — repeat the expression
+- NEVER use correlated subqueries in WHERE clause — use CTEs with ROW_NUMBER() instead
+- NEVER use SELECT DISTINCT as the only deduplication strategy for production — use ROW_NUMBER()
+- Field names are case-sensitive — match exactly as documented
+- Queries time out after 30 minutes — avoid full table scans without date filters
+- Dates stored in Central Standard Time (UTC-6). Daylight Savings NOT observed
+- No spaces around * in multiplication: COUNT(b.EventDate)*100/COUNT(s.EventDate)
+
+════════════════════════════════════════════════════════════════
 SECTION 2 — QUERY STUDIO RULES
-════════════════════════════════════════════════════════
-- Always add TOP 100 — results go to Preview only, nothing written to any DE
-- Read-only SELECT statements only
+════════════════════════════════════════════════════════════════
+- Always add TOP 100
+- Read-only SELECT — results go to Preview only, nothing written to any DE
 - No UNION or UNION ALL
 - No correlated subqueries
 - No ORDER BY without TOP
-- Use Query Studio to validate logic before Automation Studio
+- Keep queries simple for validation
 
-════════════════════════════════════════════════════════
-SECTION 3 — AUTOMATION STUDIO QUERY ACTIVITY RULES
-════════════════════════════════════════════════════════
-- No row limit — processes full dataset
-- Results automatically written to configured target DE — do NOT write INSERT INTO
-- Just SELECT the columns — the activity handles the write
-- Supports CTEs (WITH clause), subqueries, UNION ALL
-- Always add comment: -- Target DE: [SuggestedName]
-- Action types: Append (add rows) | Update (match+insert) | Overwrite (replace all)
-- To keep history beyond 6 months: mirror data views via scheduled automation into custom DEs
+════════════════════════════════════════════════════════════════
+SECTION 3 — AUTOMATION STUDIO RULES
+════════════════════════════════════════════════════════════════
+- No row limit — full dataset processed
+- Results auto-written to configured target DE — do NOT write INSERT INTO
+- Supports CTEs (WITH clause), subqueries, UNION ALL, ROW_NUMBER(), window functions
+- Always add: -- Target DE: [SuggestedName]
+- Action types: Append | Update | Overwrite
+- Always add a date filter (e.g. last 6 months) to avoid timeout on large data views
 
-════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════
 SECTION 4 — ENT. PREFIX AND BU RULES
-════════════════════════════════════════════════════════
-- ENT. prefix required ONLY when querying from a child Business Unit
-- NOT required when querying from the parent Business Unit
-- _Job is the ONLY BU-specific data view — shows only jobs from the BU where query runs
-- _Subscribers only returns results at Enterprise level — use ENT._Subscribers from child BU
-- _BusinessUnitUnsubscribes can ONLY be queried from the Parent Business Unit
+════════════════════════════════════════════════════════════════
+- ENT. prefix required ONLY from child Business Unit
+- NOT required from parent Business Unit
+- _Job is BU-specific — shows only jobs from BU where query executes
+- _JourneyActivity is BU-specific — only shows activities from BU where query executes
+- _Subscribers returns Enterprise-level data — use ENT._Subscribers from child BU
+- _BusinessUnitUnsubscribes can ONLY be queried from Parent BU
 
-════════════════════════════════════════════════════════
-SECTION 5 — JOIN RULES (read every rule carefully)
-════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════
+SECTION 5 — DATA RETENTION RULES
+════════════════════════════════════════════════════════════════
+6-MONTH RETENTION (filter with date ranges):
+_Sent, _Open, _Click, _Bounce, _Unsubscribe, _Complaint, _Job,
+_JourneyActivity, _ReconcilableDispositionView (7 days only)
 
-RULE 1 — MINIMUM JOINS: Only join what the user actually needs.
-- If user only needs SubscriberKey + EventDate from _Sent: query _Sent alone, no joins
-- If user needs EmailAddress: join _Subscribers ON SubscriberKey
-- If user needs EmailName, FromName, Subject: join _Job ON JobID ONLY
-- If user needs open/click/bounce data: join the tracking view with 4-key pattern
-- NEVER add _Job unless the user explicitly needs email metadata fields from it
+NO RETENTION LIMIT (full historical data):
+_Subscribers, _EnterpriseAttribute, _ListSubscribers,
+_BusinessUnitUnsubscribes, _Journey
 
-RULE 2 — 4-KEY JOIN PATTERN: Use all 4 keys ONLY between tracking data views.
-Applies to: _Sent with _Open, _Click, _Bounce, _Unsubscribe, _Complaint
+════════════════════════════════════════════════════════════════
+SECTION 6 — JOIN DECISION TREE (follow before writing any JOIN)
+════════════════════════════════════════════════════════════════
+Need SubscriberKey/EventDate only?
+  → _Sent alone, no joins needed
+
+Need EmailAddress or subscriber Status?
+  → + _Subscribers ON s.SubscriberKey = sub.SubscriberKey
+
+Need EmailName, Subject, FromName, FromEmail?
+  → + _Job ON s.JobID = j.JobID (JobID only — nothing else)
+
+Need open/click/bounce/unsub tracking?
+  → + tracking view with 4-key join pattern + IsUnique=1 in JOIN
+
+Need profile attributes (Gender, City, custom fields)?
+  → + ENT._EnterpriseAttribute ON s.SubscriberID = ea._SubscriberID
+  → NOTE: attribute names may have spaces — use [Attribute Name] notation
+
+Need journey name or journey status?
+  → + _JourneyActivity ON s.TriggererSendDefinitionObjectID = ja.JourneyActivityObjectID
+  → + _Journey ON ja.VersionID = jy.VersionID
+  → NEVER look for JourneyName in _Job — it does NOT exist there
+
+Need list membership?
+  → + _ListSubscribers ON s.SubscriberKey = ls.SubscriberKey
+
+Need transactional delivery status?
+  → + _ReconcilableDispositionView ON s.JobID = rdv.JobId (7-day retention only)
+
+════════════════════════════════════════════════════════════════
+SECTION 7 — JOIN RULES (never break these)
+════════════════════════════════════════════════════════════════
+RULE 1 — 4-KEY PATTERN: When joining _Sent to _Open, _Click, _Bounce, _Unsubscribe, _Complaint:
     ON  a.JobID        = b.JobID
     AND a.ListID       = b.ListID
     AND a.BatchID      = b.BatchID
     AND a.SubscriberID = b.SubscriberID
 
-RULE 3 — IsUnique = 1 goes in the JOIN condition, NEVER in WHERE.
-Applies to: _Open, _Click, _Bounce, _Unsubscribe
-    LEFT JOIN _Open o ON s.JobID=o.JobID AND s.ListID=o.ListID
-        AND s.BatchID=o.BatchID AND s.SubscriberID=o.SubscriberID AND o.IsUnique=1
+RULE 2 — IsUnique = 1 ALWAYS in JOIN condition, NEVER in WHERE:
+    LEFT JOIN _Open o
+        ON s.JobID=o.JobID AND s.ListID=o.ListID
+        AND s.BatchID=o.BatchID AND s.SubscriberID=o.SubscriberID
+        AND o.IsUnique=1
 
-RULE 4 — _Job joins on JobID ONLY. It has NO subscriber fields.
-    CORRECT:   INNER JOIN _Job j ON s.JobID = j.JobID
-    WRONG:     INNER JOIN _Job j ON s.JobID=j.JobID AND s.ListID=j.ListID
+RULE 3 — _Job joins on JobID ONLY (no subscriber fields exist in _Job):
+    CORRECT: INNER JOIN _Job j ON s.JobID = j.JobID
+    WRONG:   INNER JOIN _Job j ON s.JobID=j.JobID AND s.ListID=j.ListID
 
-RULE 5 — _Subscribers joins on SubscriberKey.
-    CORRECT: INNER JOIN _Subscribers sub ON s.SubscriberKey = sub.SubscriberKey
+RULE 4 — _Subscribers joins on SubscriberKey:
+    INNER JOIN _Subscribers sub ON s.SubscriberKey = sub.SubscriberKey
 
-RULE 6 — _EnterpriseAttribute joins on SubscriberID = _SubscriberID (note underscore prefix on _SubscriberID).
-    CORRECT: INNER JOIN ENT._EnterpriseAttribute ea ON s.SubscriberID = ea._SubscriberID
+RULE 5 — _EnterpriseAttribute joins on SubscriberID = _SubscriberID (underscore is mandatory):
+    INNER JOIN ENT._EnterpriseAttribute ea ON s.SubscriberID = ea._SubscriberID
 
-RULE 7 — DECISION TREE (always follow this before writing any JOIN):
-    Need SubscriberKey/EventDate only?          use _Sent alone, no joins
-    Need EmailAddress?                          add _Subscribers ON SubscriberKey
-    Need EmailName/Subject/FromName?            add _Job ON JobID only
-    Need open/click/bounce/unsub tracking?      add tracking view, 4-key join, IsUnique=1 in JOIN
-    Need profile attributes like Gender?        add ENT._EnterpriseAttribute ON SubscriberID=_SubscriberID
-    Need list membership?                       add _ListSubscribers ON SubscriberKey
-    Need journey data?                          add _JourneyActivity ON SubscriberKey
+RULE 6 — Journey join path (3-step, never skip a step):
+    Step 1: JOIN _JourneyActivity ja ON s.TriggererSendDefinitionObjectID = ja.JourneyActivityObjectID
+    Step 2: JOIN _Journey jy ON ja.VersionID = jy.VersionID
+    Step 3: Filter: WHERE jy.JourneyName = 'YourJourneyName'
 
-════════════════════════════════════════════════════════
-SECTION 6 — COMPLETE DATA VIEW FIELD REFERENCE
-════════════════════════════════════════════════════════
+RULE 7 — Deduplication for production queries: always use ROW_NUMBER() not just DISTINCT:
+    WITH RankedData AS (
+        SELECT ..., ROW_NUMBER() OVER (PARTITION BY s.SubscriberKey ORDER BY b.EventDate DESC) AS rn
+        FROM ...
+    )
+    SELECT ... FROM RankedData WHERE rn = 1
+
+RULE 8 — Performance: always filter by EventDate on data views with 6-month retention:
+    WHERE s.EventDate >= DATEADD(day, -30, GETDATE())
+
+════════════════════════════════════════════════════════════════
+SECTION 8 — COMPLETE DATA VIEW FIELD REFERENCE
+════════════════════════════════════════════════════════════════
 
 _Sent
 Fields: AccountID, OYBAccountID, JobID, ListID, BatchID, SubscriberID, SubscriberKey,
         EventDate, Domain, TriggererSendDefinitionObjectID, TriggeredSendCustomerKey
-Notes: Logs all email sends. 6-month retention. One row per send per subscriber.
+Notes: 6-month retention. One row per send per subscriber. No dedup field.
+       TriggererSendDefinitionObjectID links to _JourneyActivity.JourneyActivityObjectID
 
 _Open
 Fields: AccountID, OYBAccountID, JobID, ListID, BatchID, SubscriberID, SubscriberKey,
         EventDate, Domain, IsUnique, TriggererSendDefinitionObjectID, TriggeredSendCustomerKey
-Notes: Multiple rows per subscriber if opened more than once.
-       IsUnique=1 means first open for that JobID by that subscriber. Use in JOIN not WHERE.
-       For unique open count use: COUNT(CASE WHEN o.IsUnique=1 THEN 1 END)
+Notes: Multiple rows per subscriber per email. IsUnique=1 = first open for that JobID.
+       IsUnique goes in JOIN not WHERE. Opens are pixel-based — may be unreliable (Apple MPP).
+       For unique open count: COUNT(CASE WHEN o.IsUnique=1 THEN 1 END)
 
 _Click
 Fields: AccountID, OYBAccountID, JobID, ListID, BatchID, SubscriberID, SubscriberKey,
         EventDate, Domain, URL, LinkName, LinkContent, IsUnique,
         TriggererSendDefinitionObjectID, TriggeredSendCustomerKey
-Notes: Multiple rows per link click. IsUnique=1 means first click on ANY link in that JobID.
-       URL has raw URL without AMPscript vars. LinkContent has resolved AMPscript values.
+Notes: IsUnique=1 = first click on ANY link in that JobID (not per URL).
+       URL = raw URL without AMPscript. LinkContent = resolved AMPscript values.
+       Clicks are more reliable than opens for engagement tracking.
 
 _Bounce
 Fields: AccountID, OYBAccountID, JobID, ListID, BatchID, SubscriberID, SubscriberKey,
@@ -239,110 +283,131 @@ Fields: AccountID, OYBAccountID, JobID, ListID, BatchID, SubscriberID, Subscribe
         BounceSubcategoryID, BounceSubcategory, BounceTypeID, BounceType,
         SMTPBounceReason, SMTPMessage, SMTPCode, IsFalseBounce,
         TriggererSendDefinitionObjectID, TriggeredSendCustomerKey
-Notes: SMTPBounceReason is nvarchar(MAX) — always use LEFT(SMTPBounceReason, 4000) when saving to DE.
-       SMTPCode 541 or 554 means blocklisted or considered spam — act immediately.
-       IsFalseBounce=1 means not a real bounce — always filter this out before suppressing.
-       BounceCategory values include: Hard bounce, Soft bounce, Technical
+Notes: BounceCategory values: Hard bounce, Soft bounce, Technical
+       SMTPBounceReason is nvarchar(MAX) — use LEFT(SMTPBounceReason, 4000) before saving to DE
+       SMTPCode 541/554 = blocklisted. IsFalseBounce=1 = not real — exclude with IsFalseBounce=0
 
 _Unsubscribe
 Fields: AccountID, OYBAccountID, JobID, ListID, BatchID, SubscriberID, SubscriberKey,
         EventDate, Domain, IsUnique, TriggererSendDefinitionObjectID, TriggeredSendCustomerKey
-Notes: Logs unsubscribe events per send job. Use for suppression list building.
 
 _Complaint
 Fields: AccountID, OYBAccountID, JobID, ListID, BatchID, SubscriberID, SubscriberKey,
         EventDate, IsUnique, Domain
-Notes: Spam complaints via Email Service Provider Feedback Loop.
-       Only populated if FBL is enabled in your account. Join _Job on JobID for email name.
+Notes: Spam complaints via FBL. Only populated if FBL enabled on account.
 
 _Job
-Fields: JobID, EmailID, EmailName, EmailSubject, FromName, FromEmail, BccEmail,
-        DeliveredTime, SchedTime, PickupTime, CreatedDate, IsMultipart,
-        IsWrapped, SuppressTracking, SendClassification, CharacterSet, AccountUserID
-CRITICAL RULES FOR _Job:
-- _Job has NO subscriber fields — no SubscriberID, SubscriberKey, ListID, BatchID, IsUnique
-- _Job is BU-specific — only shows jobs run from the BU where the query executes
-- Join _Job on JobID ONLY: INNER JOIN _Job j ON s.JobID = j.JobID
-- EmailName, FromName, FromEmail, EmailSubject are ONLY in _Job — not in _Sent/_Open/_Click/_Bounce
-- AccountUserID is useful for audit logs of which user triggered each send
-- IsWrapped=1 or SuppressTracking=1 means tracking data may be missing for that job
+Fields: JobID, EmailID, AccountID, AccountUserID, FromName, FromEmail, SchedTime, PickupTime,
+        DeliveredTime, EventID, IsMultipart, JobType, JobStatus, ModifiedBy, ModifiedDate,
+        EmailName, EmailSubject, IsWrapped, TestEmailAddr, Category, BccEmail,
+        OriginalSchedTime, CreatedDate, CharacterSet, SalesForceTotalSubscriberCount,
+        SalesForceErrorSubscriberCount, SendType, DynamicEmailSubject, SuppressTracking,
+        SendClassificationType, SendClassification, ResolveLinksWithCurrentData,
+        EmailSendDefinition, DeduplicateByEmail, TriggererSendDefinitionObjectID,
+        TriggeredSendCustomerKey
+CRITICAL: _Job has NO subscriber fields — no SubscriberID, SubscriberKey, ListID, BatchID
+          _Job is BU-specific — only shows jobs from the BU where query executes
+          Join on JobID ONLY: INNER JOIN _Job j ON s.JobID = j.JobID
+          JourneyName does NOT exist in _Job — use _Journey view for journey names
+          Category LIKE 'version%' filters to Journey sends specifically
+          IsWrapped=1 or SuppressTracking=1 means tracking data may be missing
 
 _Subscribers
-Fields: SubscriberID, SubscriberKey, EmailAddress, Domain, Status,
-        DateCreated, DateUnsubscribed, DateUndeliverable, BounceCount,
-        SubscriberType, Locale
-Notes: Status values: Active, Bounced, Unsubscribed, Held.
-       Does NOT contain profile attributes — use _EnterpriseAttribute for those.
-       No 6-month retention — holds all current subscribers.
-       Join on SubscriberKey: INNER JOIN _Subscribers sub ON s.SubscriberKey = sub.SubscriberKey
+Fields: SubscriberID, SubscriberKey, EmailAddress, Domain, Status, DateJoined,
+        DateUnsubscribed, DateUndeliverable, BounceCount, SubscriberType, Locale
+Notes: Status values: active, bounced, unsubscribed, held (lowercase)
+       No profile attributes here — use _EnterpriseAttribute for those
+       No 6-month retention. Join on SubscriberKey.
 
 ENT._EnterpriseAttribute
-Fields: _SubscriberID, plus all custom profile attribute columns (varies per org)
-Notes: Join on SubscriberID = _SubscriberID (underscore prefix on _SubscriberID is mandatory).
-       New profile attributes automatically add new columns to this view.
-       Always use ENT._EnterpriseAttribute from child BU. No 6-month retention.
+Fields: _SubscriberID (mandatory underscore), + custom profile/preference attribute columns
+Notes: Attribute names with spaces need square brackets: [Attribute Name]
+       EmailAddress is NOT in this view — use _Subscribers for email address
+       Default HTML Email preference attribute is NOT queryable
+       No 6-month retention. Always ENT. prefix from child BU.
+       Join: INNER JOIN ENT._EnterpriseAttribute ea ON s.SubscriberID = ea._SubscriberID
 
-_ListSubscribers
-Fields: SubscriberID, SubscriberKey, ListID, ListName, Status, DateUnsubscribed,
-        CreatedDate, DateHeld, SubscriberType, Locale
-Notes: List-level membership and per-list status. No 6-month retention.
+_Journey
+Fields: VersionID, JourneyID, JourneyName, VersionNumber, CreatedDate,
+        LastPublishedDate, ModifiedDate, JourneyStatus
+Notes: JourneyStatus values: Draft, Published, Stopped, Paused, Finishing
+       No 6-month retention. This is the ONLY place JourneyName exists.
+       JOIN path from _Sent: _Sent.TriggererSendDefinitionObjectID
+         → _JourneyActivity.JourneyActivityObjectID → _JourneyActivity.VersionID
+         → _Journey.VersionID
 
 _JourneyActivity
-Fields: VersionID, ActivityID, ActivityName, ActivityExternalKey, ActivityType,
-        JourneyActivityObjectID, SubscriberKey, EventDate
-Notes: JourneyActivityObjectID matches TriggererSendDefinitionObjectID in _Open/_Click/_Bounce/_Sent.
-       Use this to join journey activity data with email tracking events.
+Fields: VersionID, ActivityID, ActivityName, ActivityExternalKey,
+        ActivityType, JourneyActivityObjectID
+Notes: BU-specific — only shows activities from BU where query executes
+       6-month retention
+       JourneyActivityObjectID matches TriggererSendDefinitionObjectID in _Sent/_Open/_Click/_Bounce
+       VersionID links to _Journey.VersionID
+
+_ListSubscribers
+Fields: SubscriberKey, SubscriberID, ListID, ListName, ListType, Status,
+        DateUnsubscribed, AddedBy, AddMethod, CreatedDate, EmailAddress, SubscriberType
+Notes: No 6-month retention. List-level membership per subscriber.
 
 _BusinessUnitUnsubscribes
 Fields: BusinessUnitID, SubscriberID, SubscriberKey, UnsubDateUTC, UnsubReason
-Notes: BU-level unsubscribes. Query from Parent BU only.
-       UnsubDateUTC is UTC — use DATEADD to normalize vs other system dates which are CST.
+Notes: Parent BU query only. UnsubDateUTC is UTC — normalize with DATEADD if comparing to CST.
        No 6-month retention.
+
+_ReconcilableDispositionView
+Fields: JobId, Channel, Disposition, MessageKey, SubscriberKey, SubscriberID,
+        ErrorCodeID, ErrorName, ErrorDescription, StartTime
+Notes: 7-DAY retention only. Transactional sends only.
+       Disposition: 0=Queued, 1=Sent, 2=NotSent
+       Channel: 0=Email, 1=SMS
+       ErrorCodeID populated only when Disposition=2
 
 _AutomationInstance
 Fields: MemberID, AutomationName, AutomationCustomerKey, AutomationType,
-        AutomationInstanceID, AutomationInstanceStatus,
-        AutomationInstanceStartTime_UTC, AutomationInstanceEndTime_UTC,
-        AutomationInstanceActivityErrorDetails, AutomationStepCount,
-        FilenameFromTrigger, AutomationInstanceScheduledTime_UTC
-Notes: Use to monitor automation run history, errors and performance.
+        AutomationInstanceID, AutomationInstanceStatus, AutomationInstanceStartTime_UTC,
+        AutomationInstanceEndTime_UTC, AutomationInstanceActivityErrorDetails,
+        AutomationStepCount, FilenameFromTrigger, AutomationInstanceScheduledTime_UTC
+Notes: Use to monitor automation health, error rates, performance.
 
-════════════════════════════════════════════════════════
-SECTION 7 — DATE AND STRING FUNCTIONS
-════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════
+SECTION 9 — DATE AND STRING FUNCTIONS
+════════════════════════════════════════════════════════════════
 DATE:
-GETDATE()                                    current datetime in CST
-DATEADD(hour, -24, GETDATE())               last 24 hours
-DATEADD(day, -7, GETDATE())                 last 7 days
-DATEADD(day, -30, GETDATE())                last 30 days
-DATEADD(month, -3, GETDATE())               last 3 months
-DATEDIFF(day, DateField, GETDATE())         days since a date
-CONVERT(DATE, DateField)                    strip time component
-CONVERT(VARCHAR, DateField, 101)            MM/DD/YYYY format
-CONVERT(VARCHAR, DateField, 120)            YYYY-MM-DD HH:MM:SS format
-YEAR(DateField) | MONTH(DateField) | DAY(DateField)
+GETDATE()                                  current datetime (CST)
+DATEADD(hour, -24, GETDATE())             last 24 hours
+DATEADD(day, -7, GETDATE())               last 7 days
+DATEADD(day, -30, GETDATE())              last 30 days
+DATEADD(month, -3, GETDATE())             last 3 months
+DATEADD(month, -6, GETDATE())             last 6 months (max for data views)
+DATEDIFF(day, DateField, GETDATE())       days since date
+CONVERT(DATE, DateField)                  strip time
+CONVERT(VARCHAR, DateField, 101)          MM/DD/YYYY
+CONVERT(VARCHAR, DateField, 120)          YYYY-MM-DD HH:MM:SS
+YEAR() | MONTH() | DAY()
 
-STRING (use + not CONCAT):
-Field1 + ' ' + Field2                       string concatenation
-ISNULL(Field, 'default')                    null substitution
-COALESCE(Field1, Field2, 'fallback')        first non-null value
-LEN(Field) | UPPER(Field) | LOWER(Field)    length and case
-LTRIM(Field) | RTRIM(Field)                 whitespace removal
-SUBSTRING(Field, start, length)             extract substring
-REPLACE(Field, 'old', 'new')               replace substring
-LEFT(Field, N) | RIGHT(Field, N)            extract N characters
-LEFT(SMTPBounceReason, 4000)               always truncate before saving to DE
+STRING (never use CONCAT):
+Field1 + ' ' + Field2                     concatenation
+ISNULL(Field, 'default')                  null handling
+COALESCE(F1, F2, 'fallback')             first non-null
+LEN() | UPPER() | LOWER()
+LTRIM() | RTRIM()
+SUBSTRING(Field, start, length)
+REPLACE(Field, 'old', 'new')
+LEFT(Field, N) | RIGHT(Field, N)
+LEFT(SMTPBounceReason, 4000)             always truncate nvarchar(MAX) before saving
 
 AGGREGATE:
 COUNT(*) | COUNT(Field) | COUNT(DISTINCT Field)
 SUM() | AVG() | MIN() | MAX()
-COUNT(b.EventDate)*100/COUNT(s.EventDate)   bounce rate — no spaces around *
+COUNT(b.EventDate)*100/COUNT(s.EventDate)  bounce rate (no spaces around *)
+ROW_NUMBER() OVER (PARTITION BY Field ORDER BY DateField DESC)
+CASE WHEN condition THEN value ELSE other END
 
-════════════════════════════════════════════════════════
-SECTION 8 — PROVEN QUERY PATTERNS
-════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════
+SECTION 10 — PRODUCTION-GRADE QUERY PATTERNS
+════════════════════════════════════════════════════════════════
 
-PATTERN 1 — Simple sent query, no joins needed:
+PATTERN 1 — Simple sent query, no joins:
 SELECT s.SubscriberKey, s.EventDate
 FROM _Sent s
 WHERE s.EventDate >= DATEADD(hour, -24, GETDATE())
@@ -353,7 +418,7 @@ FROM _Sent s
 INNER JOIN _Subscribers sub ON s.SubscriberKey = sub.SubscriberKey
 WHERE s.EventDate >= DATEADD(hour, -24, GETDATE())
 
-PATTERN 3 — Sent with email metadata:
+PATTERN 3 — Sent with email metadata from _Job:
 SELECT s.SubscriberKey, sub.EmailAddress, j.EmailName, j.FromName, s.EventDate AS SentDate
 FROM _Sent s
 INNER JOIN _Subscribers sub ON s.SubscriberKey = sub.SubscriberKey
@@ -381,7 +446,6 @@ SELECT
     c.URL AS ClickedURL,
     b.EventDate AS BounceDate,
     b.BounceCategory,
-    b.BounceSubcategory,
     LEFT(b.SMTPBounceReason, 500) AS BounceReason,
     u.EventDate AS UnsubscribeDate
 FROM _Sent s
@@ -391,8 +455,9 @@ LEFT JOIN _Open o ON s.JobID=o.JobID AND s.ListID=o.ListID AND s.BatchID=o.Batch
 LEFT JOIN _Click c ON s.JobID=c.JobID AND s.ListID=c.ListID AND s.BatchID=c.BatchID AND s.SubscriberID=c.SubscriberID AND c.IsUnique=1
 LEFT JOIN _Bounce b ON s.JobID=b.JobID AND s.ListID=b.ListID AND s.BatchID=b.BatchID AND s.SubscriberID=b.SubscriberID AND b.IsUnique=1
 LEFT JOIN _Unsubscribe u ON s.JobID=u.JobID AND s.ListID=u.ListID AND s.BatchID=u.BatchID AND s.SubscriberID=u.SubscriberID AND u.IsUnique=1
+WHERE s.EventDate >= DATEADD(day, -30, GETDATE())
 
-PATTERN 6 — Bounce rate by domain:
+PATTERN 6 — Bounce rate by domain (ROW_NUMBER not needed, aggregate only):
 SELECT TOP 20
     s.Domain,
     COUNT(s.EventDate) AS SendCount,
@@ -405,21 +470,7 @@ GROUP BY s.Domain
 HAVING COUNT(s.EventDate) >= 100
 ORDER BY COUNT(b.EventDate)*100/COUNT(s.EventDate) DESC
 
-PATTERN 7 — Suppression from exclusion list:
-SELECT m.SubscriberKey, m.EmailAddress
-FROM MasterDE m
-LEFT JOIN SuppressionDE s ON m.EmailAddress = s.EmailAddress
-WHERE s.EmailAddress IS NULL
-
-PATTERN 8 — Active openers who never clicked:
-SELECT DISTINCT o.SubscriberKey
-FROM _Open o
-INNER JOIN _Subscribers sub ON o.SubscriberKey = sub.SubscriberKey
-LEFT JOIN _Click c ON o.JobID=c.JobID AND o.ListID=c.ListID AND o.BatchID=c.BatchID AND o.SubscriberID=c.SubscriberID AND c.IsUnique=1
-WHERE o.EventDate >= DATEADD(day, -30, GETDATE())
-AND o.IsUnique = 1 AND c.SubscriberID IS NULL AND sub.Status = 'Active'
-
-PATTERN 9 — Hard bounces for suppression:
+PATTERN 7 — Hard bounce suppression list:
 SELECT DISTINCT b.SubscriberKey, sub.EmailAddress
 FROM _Bounce b
 INNER JOIN _Subscribers sub ON b.SubscriberKey = sub.SubscriberKey
@@ -427,24 +478,143 @@ WHERE b.EventDate >= DATEADD(day, -90, GETDATE())
 AND b.BounceCategory = 'Hard bounce'
 AND b.IsFalseBounce = 0
 
-PATTERN 10 — Journey email engagement:
+PATTERN 8 — Active openers who never clicked:
+SELECT DISTINCT o.SubscriberKey
+FROM _Open o
+INNER JOIN _Subscribers sub ON o.SubscriberKey = sub.SubscriberKey
+LEFT JOIN _Click c ON o.JobID=c.JobID AND o.ListID=c.ListID AND o.BatchID=c.BatchID AND o.SubscriberID=c.SubscriberID AND c.IsUnique=1
+WHERE o.EventDate >= DATEADD(day, -30, GETDATE())
+AND o.IsUnique=1 AND c.SubscriberID IS NULL AND sub.Status='active'
+
+PATTERN 9 — Suppression / exclusion join:
+SELECT m.SubscriberKey, m.EmailAddress
+FROM MasterDE m
+LEFT JOIN SuppressionDE s ON m.EmailAddress = s.EmailAddress
+WHERE s.EmailAddress IS NULL
+
+PATTERN 10 — CORRECT Journey query (3-step join, ROW_NUMBER dedup):
+WITH JourneyEngagement AS (
+    SELECT
+        s.SubscriberKey,
+        sub.EmailAddress,
+        sub.Status AS SubscriberStatus,
+        jy.JourneyName,
+        jy.VersionNumber,
+        jy.JourneyStatus,
+        ja.ActivityName,
+        j.EmailName,
+        s.EventDate AS SentDate,
+        o.EventDate AS OpenDate,
+        c.EventDate AS ClickDate,
+        b.EventDate AS BounceDate,
+        b.BounceCategory,
+        ROW_NUMBER() OVER (PARTITION BY s.SubscriberKey ORDER BY s.EventDate DESC) AS rn
+    FROM _Sent s
+    INNER JOIN _Job j ON s.JobID = j.JobID
+    INNER JOIN _Subscribers sub ON s.SubscriberKey = sub.SubscriberKey
+    INNER JOIN _JourneyActivity ja ON s.TriggererSendDefinitionObjectID = ja.JourneyActivityObjectID
+    INNER JOIN _Journey jy ON ja.VersionID = jy.VersionID
+    LEFT JOIN _Open o ON s.JobID=o.JobID AND s.ListID=o.ListID AND s.BatchID=o.BatchID AND s.SubscriberID=o.SubscriberID AND o.IsUnique=1
+    LEFT JOIN _Click c ON s.JobID=c.JobID AND s.ListID=c.ListID AND s.BatchID=c.BatchID AND s.SubscriberID=c.SubscriberID AND c.IsUnique=1
+    LEFT JOIN _Bounce b ON s.JobID=b.JobID AND s.ListID=b.ListID AND s.BatchID=b.BatchID AND s.SubscriberID=b.SubscriberID AND b.IsUnique=1
+    WHERE s.EventDate >= DATEADD(day, -30, GETDATE())
+    AND jy.JourneyName = 'YourJourneyName'
+)
+SELECT SubscriberKey, EmailAddress, SubscriberStatus, JourneyName,
+       VersionNumber, ActivityName, EmailName, SentDate, OpenDate, ClickDate, BounceDate, BounceCategory
+FROM JourneyEngagement
+WHERE rn = 1
+
+PATTERN 11 — ROW_NUMBER deduplication template (use for any complex query):
+WITH RankedResults AS (
+    SELECT
+        s.SubscriberKey,
+        sub.EmailAddress,
+        b.EventDate AS BounceDate,
+        b.BounceCategory,
+        ROW_NUMBER() OVER (
+            PARTITION BY s.SubscriberKey
+            ORDER BY b.EventDate DESC
+        ) AS rn
+    FROM _Sent s
+    INNER JOIN _Subscribers sub ON s.SubscriberKey = sub.SubscriberKey
+    LEFT JOIN _Bounce b ON s.JobID=b.JobID AND s.ListID=b.ListID
+        AND s.BatchID=b.BatchID AND s.SubscriberID=b.SubscriberID AND b.IsUnique=1
+    WHERE s.EventDate >= DATEADD(day, -90, GETDATE())
+)
+SELECT SubscriberKey, EmailAddress, BounceDate, BounceCategory
+FROM RankedResults
+WHERE rn = 1
+
+PATTERN 12 — High Value Lapsed Responders (journey bounce re-engagement):
+WITH LatestJourneySend AS (
+    SELECT
+        s.SubscriberKey,
+        s.JobID,
+        s.ListID,
+        s.BatchID,
+        s.SubscriberID,
+        s.EventDate AS SentDate,
+        ROW_NUMBER() OVER (
+            PARTITION BY s.SubscriberKey
+            ORDER BY s.EventDate DESC
+        ) AS rn
+    FROM _Sent s
+    INNER JOIN _JourneyActivity ja ON s.TriggererSendDefinitionObjectID = ja.JourneyActivityObjectID
+    INNER JOIN _Journey jy ON ja.VersionID = jy.VersionID
+    WHERE jy.JourneyName = 'Spring_Retail_2026'
+    AND jy.JourneyStatus = 'Published'
+    AND s.EventDate >= DATEADD(month, -6, GETDATE())
+),
+OpenHistory AS (
+    SELECT SubscriberKey, COUNT(DISTINCT JobID) AS TotalOpens
+    FROM _Open
+    WHERE EventDate >= DATEADD(month, -6, GETDATE())
+    GROUP BY SubscriberKey
+    HAVING COUNT(DISTINCT JobID) >= 3
+)
 SELECT
-    s.SubscriberKey,
+    ljs.SubscriberKey,
     sub.EmailAddress,
-    j.EmailName,
-    ja.ActivityName AS JourneyActivity,
-    s.EventDate AS SentDate,
-    o.EventDate AS OpenDate,
-    c.EventDate AS ClickDate
+    sub.Status AS SubscriberStatus,
+    oh.TotalOpens,
+    b.EventDate AS BounceDate,
+    b.BounceCategory
+FROM LatestJourneySend ljs
+INNER JOIN _Subscribers sub ON ljs.SubscriberKey = sub.SubscriberKey
+INNER JOIN OpenHistory oh ON ljs.SubscriberKey = oh.SubscriberKey
+INNER JOIN _Bounce b ON ljs.JobID=b.JobID AND ljs.ListID=b.ListID
+    AND ljs.BatchID=b.BatchID AND ljs.SubscriberID=b.SubscriberID
+    AND b.IsUnique=1
+WHERE ljs.rn = 1
+AND sub.Status = 'active'
+AND b.BounceCategory IN ('Hard bounce', 'Soft bounce')
+
+PATTERN 13 — Email fatigue (sent 5+ times in a month):
+SELECT s.SubscriberKey, sub.EmailAddress, COUNT(s.JobID) AS EmailsSent
 FROM _Sent s
-INNER JOIN _Job j ON s.JobID = j.JobID
 INNER JOIN _Subscribers sub ON s.SubscriberKey = sub.SubscriberKey
+WHERE s.EventDate >= DATEADD(month, -1, GETDATE())
+GROUP BY s.SubscriberKey, sub.EmailAddress
+HAVING COUNT(s.JobID) >= 5
+
+PATTERN 14 — Unique openers count per email:
+SELECT
+    j.EmailName,
+    j.EmailSubject,
+    COUNT(CASE WHEN o.IsUnique=1 THEN 1 END) AS UniqueOpens,
+    COUNT(CASE WHEN c.IsUnique=1 THEN 1 END) AS UniqueClicks,
+    COUNT(DISTINCT s.SubscriberKey) AS TotalSent
+FROM _Job j
+INNER JOIN _Sent s ON j.JobID = s.JobID
 LEFT JOIN _Open o ON s.JobID=o.JobID AND s.ListID=o.ListID AND s.BatchID=o.BatchID AND s.SubscriberID=o.SubscriberID AND o.IsUnique=1
 LEFT JOIN _Click c ON s.JobID=c.JobID AND s.ListID=c.ListID AND s.BatchID=c.BatchID AND s.SubscriberID=c.SubscriberID AND c.IsUnique=1
-LEFT JOIN _JourneyActivity ja ON s.SubscriberKey = ja.SubscriberKey
-    AND s.TriggererSendDefinitionObjectID = ja.JourneyActivityObjectID
+WHERE s.EventDate >= DATEADD(day, -30, GETDATE())
+GROUP BY j.EmailName, j.EmailSubject
 
-PLACEHOLDER DE NAMES: CustomerMaster | EmailEngagement | GlobalSuppression | RenewalCandidates | TrackingLog | JourneyEntrants | HardBounceList | BUUnsubList
+PLACEHOLDER DE NAMES: CustomerMaster | EmailEngagement | GlobalSuppression | RenewalCandidates
+                      TrackingLog | JourneyEntrants | HardBounceList | ReEngagementTargets
+                      FatigueList | BUUnsubList | VIPSegment | LapsedResponders
 """
 
 
@@ -452,64 +622,121 @@ PLACEHOLDER DE NAMES: CustomerMaster | EmailEngagement | GlobalSuppression | Ren
 # FUNCTIONS
 # ─────────────────────────────────────────
 def generate_sfmc_sql(user_request, custom_de_names=""):
+    # Sanitize inputs — strip excess whitespace, cap lengths
+    user_request = user_request.strip()[:2000]
+    custom_de_names = custom_de_names.strip()[:500]
+
     de_context = (
         f"User's Data Extension names:\n{custom_de_names}"
-        if custom_de_names.strip()
+        if custom_de_names
         else "No DE names given — suggest appropriate placeholder names."
     )
-    prompt = f"""
-User Request: {user_request}
+
+    prompt = f"""User Request: {user_request}
 {de_context}
 
-Generate TWO SQL versions. Use EXACTLY this format — nothing outside the markers:
+IMPORTANT: Respond ONLY using the exact markers below. No text before ---QS_START--- or after ---EXP_END---.
+If this request is not an SFMC SQL query, respond ONLY with:
+---INVALID---
+[brief polite reason]
+---INVALID_END---
 
 ---QS_START---
 -- ⚡ QUERY STUDIO VERSION | Test Only | Max 100 Rows
-[clean sql with TOP 100, all Query Studio rules applied]
+[sql here]
 ---QS_END---
 ---AS_START---
 -- 🚀 AUTOMATION STUDIO VERSION | Production | Full Dataset
 -- Target DE: [suggest name]
-[full production sql, correct 4-key joins, IsUnique=1 in JOIN not WHERE]
+[sql here]
 ---AS_END---
 ---EXP_START---
 [2-3 plain English sentences: what it does, key logic, any warnings]
----EXP_END---
-"""
+---EXP_END---"""
+
     resp = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": SFMC_RULES},
             {"role": "user", "content": prompt}
         ],
-        temperature=0.1
+        temperature=0.1,
+        max_tokens=2048
     )
     return resp.choices[0].message.content
 
 
 def parse_response(raw):
     qs = as_ = exp = ""
+    invalid_msg = ""
+
     try:
-        if "---QS_START---" in raw:
+        # Check if AI flagged it as invalid
+        if "---INVALID---" in raw:
+            invalid_msg = raw.split("---INVALID---")[1].split("---INVALID_END---")[0].strip()
+            return "", "", "", invalid_msg
+
+        # Extract markers safely — never fall back to dumping raw
+        if "---QS_START---" in raw and "---QS_END---" in raw:
             qs = raw.split("---QS_START---")[1].split("---QS_END---")[0].strip()
-        if "---AS_START---" in raw:
+
+        if "---AS_START---" in raw and "---AS_END---" in raw:
             as_ = raw.split("---AS_START---")[1].split("---AS_END---")[0].strip()
-        if "---EXP_START---" in raw:
+
+        if "---EXP_START---" in raw and "---EXP_END---" in raw:
             exp = raw.split("---EXP_START---")[1].split("---EXP_END---")[0].strip()
+
+        # If markers missing entirely, treat as invalid — never dump raw
+        if not qs and not as_:
+            invalid_msg = "AMPify could not generate a valid SFMC SQL query for this request. Please rephrase your prompt with more specific SFMC context."
+            return "", "", "", invalid_msg
+
     except Exception:
-        qs = as_ = raw
-        exp = "Could not parse explanation."
-    return qs, as_, exp
+        invalid_msg = "Something went wrong while generating your query. Please try again."
+        return "", "", "", invalid_msg
+
+    return qs, as_, exp, ""
 
 
 def validate(req):
-    if len(req.strip()) < 15:
-        return False, "Please describe your query in more detail."
-    off = ["python", "javascript", "react", "recipe",
-           "weather", "movie", "java ", "c++", "write a story"]
-    if any(k in req.lower() for k in off):
-        return False, "AMPify only handles SFMC SQL queries."
-    return True, ""
+    req = req.strip()
+
+    # Too short
+    if len(req) < 15:
+        return False, "short", "Your prompt is too short. Please describe your SFMC query in more detail — for example: 'Get all subscribers who opened an email in the last 30 days'."
+
+    # Too long — prevents rendering issues from massive pasted content
+    if len(req) > 2000:
+        return False, "long", "Your prompt is too long. Please keep it under 2000 characters. Focus on what data you need and from which SFMC data views."
+
+    # Clear off-topic keywords
+    off_topic = [
+        "python", "javascript", "typescript", "react", "angular", "vue",
+        "html", "css", "node.js", "django", "flask", "fastapi",
+        "recipe", "cook", "food", "weather", "movie", "film", "song",
+        "java ", "c++", "c#", "ruby", "php", "swift", "kotlin",
+        "write a story", "write a poem", "write an essay",
+        "tell me a joke", "who are you", "what is ai",
+        "openai", "chatgpt", "gemini", "translate",
+        "stock price", "crypto", "bitcoin",
+    ]
+    if any(k in req.lower() for k in off_topic):
+        return False, "offtopic", "That prompt doesn't seem to be related to Salesforce Marketing Cloud. AMPify only generates SFMC SQL queries — try describing what subscriber or engagement data you need."
+
+    # Prompts that contain no SFMC-related signal at all
+    sfmc_signals = [
+        "subscriber", "email", "open", "click", "bounce", "send", "sent",
+        "journey", "automation", "data extension", "sfmc", "marketing cloud",
+        "unsubscribe", "campaign", "audience", "segment", "suppression",
+        "list", "contact", "job", "query", "select", "from", "where",
+        "fatigue", "engagement", "re-engage", "lapsed", "active", "status",
+        "deliverability", "hard bounce", "soft bounce", "complaint", "spam",
+        "attribute", "profile", "de ", "data view", "trackinglog"
+    ]
+    if not any(s in req.lower() for s in sfmc_signals):
+        return False, "nosignal", "Your prompt doesn't mention any SFMC concepts. Please describe what Marketing Cloud data you need — for example: 'Subscribers who bounced in the last 90 days' or 'Open rate by email for last month'."
+
+    return True, "", ""
 
 
 # ─────────────────────────────────────────
@@ -750,37 +977,63 @@ with right:
     section_label("Output")
     section_title("Generated SQL")
 
-    # Handle button press
-    if gen_btn:
-        if not user_request.strip():
-            st.markdown("""
-            <div style="background:#FFF4EF;border:1.5px solid rgba(255,107,53,0.3);
-                        border-radius:10px;padding:14px 18px;">
-                <div style="color:#C04000;font-weight:700;font-size:0.88rem;">⚠️ Nothing to generate</div>
-                <div style="color:#7A2800;font-size:0.83rem;margin-top:4px;">
-                    Please describe what you want the query to do in Step 1.
-                </div>
+    # ── ERROR BOX HELPER ──
+    def show_error(title, message, icon="⚠️"):
+        st.markdown(f"""
+        <div style="background:#FFF4EF;border:1.5px solid rgba(255,107,53,0.35);
+                    border-radius:12px;padding:18px 20px;margin-bottom:8px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                <span style="font-size:1.1rem;">{icon}</span>
+                <span style="color:#C04000;font-weight:700;font-size:0.9rem;">{title}</span>
             </div>
-            """, unsafe_allow_html=True)
+            <div style="color:#7A2800;font-size:0.83rem;line-height:1.6;">{message}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── HANDLE BUTTON PRESS ──
+    if gen_btn:
+        # Clear previous results on new attempt
+        for k in ['qs', 'asm', 'exp', 'err']:
+            st.session_state.pop(k, None)
+
+        if not user_request.strip():
+            st.session_state['err'] = ("Nothing to generate", "Please describe what you want the query to do in Step 1.", "📝")
 
         else:
-            ok, msg = validate(user_request)
+            ok, err_type, err_msg = validate(user_request)
             if not ok:
-                st.markdown(f"""
-                <div style="background:#FFF4EF;border:1.5px solid rgba(255,107,53,0.3);
-                            border-radius:10px;padding:14px 18px;">
-                    <div style="color:#C04000;font-weight:700;font-size:0.88rem;">❌ Invalid request</div>
-                    <div style="color:#7A2800;font-size:0.83rem;margin-top:4px;">{msg}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.session_state['err'] = ("Prompt not recognised", err_msg, "🤔")
             else:
-                with st.spinner("Generating SFMC SQL..."):
-                    raw = generate_sfmc_sql(user_request, custom_des)
-                    qs, asm, exp = parse_response(raw)
-                    st.session_state['qs'] = qs
-                    st.session_state['asm'] = asm
-                    st.session_state['exp'] = exp
-                st.toast("SQL generated!", icon="⚡")
+                try:
+                    with st.spinner("Generating SFMC SQL..."):
+                        raw = generate_sfmc_sql(user_request, custom_des)
+                        qs, asm, exp, invalid_msg = parse_response(raw)
+
+                    if invalid_msg:
+                        st.session_state['err'] = ("AMPify couldn't process this request", invalid_msg, "🤔")
+                    elif qs and asm:
+                        st.session_state['qs'] = qs
+                        st.session_state['asm'] = asm
+                        st.session_state['exp'] = exp
+                        st.toast("SQL generated!", icon="⚡")
+                    else:
+                        st.session_state['err'] = ("Generation incomplete", "AMPify generated an incomplete response. Please try rephrasing your prompt.", "⚠️")
+
+                except Exception as e:
+                    err_detail = str(e)
+                    if "rate_limit" in err_detail.lower() or "429" in err_detail:
+                        st.session_state['err'] = ("Rate limit reached", "Too many requests in a short time. Please wait a few seconds and try again.", "⏳")
+                    elif "timeout" in err_detail.lower():
+                        st.session_state['err'] = ("Request timed out", "The query took too long to generate. Please try a simpler prompt or try again.", "⏱️")
+                    elif "api" in err_detail.lower() or "groq" in err_detail.lower():
+                        st.session_state['err'] = ("Service temporarily unavailable", "There was an issue connecting to the AI service. Please try again in a moment.", "🔌")
+                    else:
+                        st.session_state['err'] = ("Something went wrong", "An unexpected error occurred. Please try again.", "⚠️")
+
+    # ── SHOW ERROR IF ANY ──
+    if st.session_state.get('err'):
+        title, message, icon = st.session_state['err']
+        show_error(title, message, icon)
 
     # Show results
     if st.session_state.get('qs'):
