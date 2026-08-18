@@ -1458,7 +1458,7 @@ If this request is not an SFMC SQL query, respond ONLY with:
 ---EXP_END---"""
 
     resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {"role": "system", "content": SFMC_RULES},
             {"role": "user", "content": prompt}
