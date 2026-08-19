@@ -115,6 +115,192 @@ client = Groq(api_key=GROQ_API_KEY)
 # SFMC KNOWLEDGE BASE
 # ─────────────────────────────────────────
 SFMC_RULES = """
+You are an SFMC SQL Architect. ONLY answer SFMC SQL queries.
+If user asks for non-SFMC data (passwords, bank balance, etc.) say: "SFMC does not store [X]. Provide exact custom field name if stored in your DE."
+
+NEVER invent fields. ONLY use fields listed in SCHEMAS below.
+_EnterpriseAttribute has ONE field: _SubscriberID. All others are custom — never assume them.
+_Job has NO: JourneyName/SubscriberID/SubscriberKey/ListID/BatchID/IsUnique.
+JourneyName ONLY in _Journey.
+
+RULES:
+No SELECT*|No #temp/@var|No DDL|No INSERT/UPDATE/DELETE|No LIMIT(use TOP N)
+No NOW()(use GETDATE())|No TRUE/FALSE(use 1/0)|No CONCAT()(use +)
+No correlated subqueries(use CTEs)|No DISTINCT alone(use ROW_NUMBER)
+No DATEPART/DATEDIFF on left of WHERE(use range filters)
+QS: TOP 100, read-only, no UNION, no ORDER BY without TOP
+AS: No limit, no INSERT INTO, supports CTEs/UNION ALL, add --Target DE:[name]
+ENT. prefix: child BU only. _Job/_JourneyActivity: BU-specific. _BUUnsubscribes: Parent BU only.
+6-month views(date filter required): _Sent _Open _Click _Bounce _Unsubscribe _Complaint _Job _JourneyActivity _SMSMessageTracking _PushMessageTracking _FTAF
+No-limit views: _Subscribers _EnterpriseAttribute _ListSubscribers _BusinessUnitUnsubscribes _Journey _AutomationInstance
+
+JOIN TREE:
+SubscriberKey/EventDate only→_Sent alone
+Need EmailAddress/Status→+_Subscribers ON s.SubscriberKey=sub.SubscriberKey
+Need EmailName/FromName→+_Job ON s.JobID=j.JobID(JobID ONLY)
+Need opens/clicks/bounces→+tracking view,4-key join,IsUnique=1 in JOIN
+Need profile attr→+ENT._EnterpriseAttribute ON s.SubscriberID=ea._SubscriberID(user must provide exact field name)
+Need JourneyName→+_JourneyActivity ON s.TriggererSendDefinitionObjectID=ja.ActivityID +_Journey ON ja.VersionID=jy.VersionID
+Need SMS→_SMSMessageTracking(not _Sent/_Open)
+Need Push→_PushMessageTracking/_PushAddress(not _Sent/_Open)
+
+JOIN RULES:
+4-KEY: ON a.JobID=b.JobID AND a.ListID=b.ListID AND a.BatchID=b.BatchID AND a.SubscriberID=b.SubscriberID
+IsUnique=1: in JOIN not WHERE
+_Job: ON s.JobID=j.JobID only
+_Subscribers: ON s.SubscriberKey=sub.SubscriberKey
+_EnterpriseAttribute: ON s.SubscriberID=ea._SubscriberID
+Journey: TriggererSendDefinitionObjectID→ja.ActivityID→ja.VersionID→jy.VersionID
+Dedup: ROW_NUMBER() OVER(PARTITION BY s.SubscriberKey ORDER BY EventDate DESC) AS rn, WHERE rn=1
+Multi-row DE: aggregate first LEFT JOIN(SELECT SubscriberKey,MAX(Amt) AS MaxAmt FROM DE GROUP BY SubscriberKey)x ON...
+NULL trap: NULL!='x'=UNKNOWN. NOT IN journey: LEFT JOIN+AND jy.JourneyName='x' in JOIN+WHERE jy.VersionID IS NULL
+OR inclusion: WHERE(cond1 OR cond2)
+Field safety: LEFT(SMTPReason,4000)|LEFT(Field,N)|CAST(Field AS VARCHAR(N))
+SARGable: WHERE EventDate>=DATEADD(day,-30,GETDATE()) not DATEPART()
+
+SCHEMAS(exact fields only):
+_Sent:AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Open:AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,IsUnique,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Click:AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,URL,LinkName,LinkContent,IsUnique,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Bounce:AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,BounceCategoryID,BounceCategory,BounceTypeCode,BounceType,SMTPCode,SMTPReason,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Complaint:AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,IsUnique,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Unsubscribe:AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,IsUnique
+_Subscribers:SubscriberID,DateUndeliverable,DateJoined,DateUnsubscribed,Domain,EmailAddress,BounceCount,SubscriberKey,Status(active/bounced/unsubscribed/held)
+_Job:JobID,EmailID,AccountID,AccountName,OYBAccountID,OYBAccountName,JobType,JobStatus,ScheduledTime,PickupTime,DeliveredTime,EventID,IsMultipart,JobIsTest,CreatedBy,ModifiedBy,MailerID,IsWrapped,TestEmailAddr,Category,BccEmail,EmailName,EmailSubject,DynamicEmailSubject,SuppressTracking,SendClassificationType,SendClassification,ReplyName,ReplyEmailAddress,FromName,FromEmail,ResourceID
+_Journey:VersionID,JourneyID,JourneyName,JourneyDescription,LastPublishedDate,DateCreated,LastModifiedDate,JourneyStatus(Draft/Published/Stopped/Paused/Finishing)
+_JourneyActivity:VersionID,ActivityID,ActivityName,ActivityExternalKey,ActivityType
+_ListSubscribers:AddedBy,AddMethod,CreatedDate,ListID,ListName,Status,SubscriberID,SubscriberKey
+_SMSMessageTracking:MobileMessageTrackingID,EID,MID,Mobile,MessageID,CodeID,ConversationID,CampaignID,Sent,Delivered,Undelivered,Outbound,Inbound,CreateDate,ModifiedDate,ActionDateTime,MessageText,IsBinary,SendID,State,Name,Description,Code,Keyword,ExperienceID
+_AutomationInstance:MemberID,AutomationName,AutomationCustomerKey,AutomationInstanceID,AutomationInstanceStatus,AutomationInstanceStartTime_UTC,AutomationInstanceEndTime_UTC,AutomationInstanceActivityErrorDetails
+_BusinessUnitUnsubscribes:BusinessUnitID,SubscriberID,SubscriberKey,UnsubDate,UnsubReason
+_PushAddress:DeviceID,SubscriberID,SubscriberKey,DeviceType,SystemName,DeviceModel,AppVersion,IsEnabled,DateCreated,DeviceToken,Platform,LocationEnabled
+_PushMessageTracking:PushMessageTrackingID,DeviceID,SubscriberID,SubscriberKey,MobilePushMessageID,MessageName,MessageType,SentDate,DeliveredDate,OpenDate,Platform,JobID,ListID,BatchID
+_EnterpriseAttribute:_SubscriberID(only guaranteed field—all others custom per org)
+_FTAF:AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,TransactionDate,IsUnique,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+
+FUNCTIONS:
+GETDATE()|DATEADD(day,-30,GETDATE())|DATEADD(hour,-24,GETDATE())|CONVERT(DATE,F)|CONVERT(VARCHAR,F,101)
+Field1+' '+Field2|ISNULL(F,'x')|LEFT(F,N)|SUBSTRING()|LEN()|UPPER()|LOWER()|CAST(F AS VARCHAR(N))
+COUNT(*)|COUNT(DISTINCT F)|ROW_NUMBER() OVER(PARTITION BY F ORDER BY D DESC)|COUNT(CASE WHEN o.IsUnique=1 THEN 1 END)
+"""
+
+import os
+from groq import Groq
+import streamlit as st
+
+# Works on both local (.env) and Streamlit Cloud (st.secrets)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Get API key — Streamlit Cloud first, then .env
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+
+st.set_page_config(
+    page_title="AMPify — SFMC SQL Generator",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+# Minimal CSS — only target what Streamlit reliably allows
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+
+.stApp { background: #F4FBFF !important; }
+#MainMenu, footer, header { visibility: hidden; }
+.block-container { padding-top: 0 !important; max-width: 100% !important; }
+
+/* Text area input styling */
+textarea {
+    background: #ffffff !important;
+    border: 1.5px solid #C8E6F5 !important;
+    border-radius: 10px !important;
+    color: #0D2B45 !important;
+    font-size: 0.88rem !important;
+    line-height: 1.65 !important;
+}
+textarea:focus {
+    border-color: #00B5E2 !important;
+    box-shadow: 0 0 0 3px rgba(0,181,226,0.1) !important;
+}
+
+/* Primary generate button */
+.stButton > button {
+    background: linear-gradient(135deg, #00B5E2, #007FAA) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 700 !important;
+    font-size: 0.92rem !important;
+    padding: 0.7rem 1.5rem !important;
+    box-shadow: 0 4px 14px rgba(0,181,226,0.35) !important;
+    width: 100% !important;
+    transition: transform 0.15s, box-shadow 0.15s !important;
+}
+.stButton > button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 20px rgba(0,181,226,0.45) !important;
+}
+
+/* Download button — secondary style */
+.stDownloadButton > button {
+    background: white !important;
+    color: #0D2B45 !important;
+    border: 1.5px solid #C8E6F5 !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 0.84rem !important;
+    width: 100% !important;
+    box-shadow: none !important;
+}
+.stDownloadButton > button:hover {
+    border-color: #00B5E2 !important;
+    background: #EEF9FF !important;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+/* Tab strip */
+.stTabs [data-baseweb="tab-list"] {
+    background: #E4F2F9 !important;
+    border-radius: 10px !important;
+    padding: 4px !important;
+    border: none !important;
+}
+.stTabs [data-baseweb="tab"] {
+    background: transparent !important;
+    border-radius: 7px !important;
+    color: #5B7A90 !important;
+    font-weight: 600 !important;
+    font-size: 0.84rem !important;
+    padding: 7px 18px !important;
+    border: none !important;
+}
+.stTabs [aria-selected="true"] {
+    background: white !important;
+    color: #0D2B45 !important;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.08) !important;
+}
+.stTabs [data-baseweb="tab-panel"] { padding: 0 !important; }
+
+/* Hide all textarea labels Streamlit adds */
+.stTextArea label { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────
+# GROQ CLIENT
+# ─────────────────────────────────────────
+client = Groq(api_key=GROQ_API_KEY)
+
+# ─────────────────────────────────────────
+# SFMC KNOWLEDGE BASE
+# ─────────────────────────────────────────
+SFMC_RULES = """
 You are an SFMC SQL Architect. Only answer SFMC SQL queries.
 If user asks for data SFMC doesn't store (passwords, bank balance, credit score, etc.) respond:
 "SFMC does not store [X]. This field doesn't exist in any SFMC data view. If you stored it in a custom DE or _EnterpriseAttribute, give me the exact field name."
@@ -1600,7 +1786,7 @@ If this request is not an SFMC SQL query, respond ONLY with:
             {"role": "user", "content": prompt}
         ],
         temperature=0.1,
-        max_tokens=2048
+        max_tokens=1500
     )
     return resp.choices[0].message.content
 
