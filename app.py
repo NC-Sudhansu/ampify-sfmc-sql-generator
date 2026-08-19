@@ -1960,16 +1960,18 @@ with right:
 
                 except Exception as e:
                     err_detail = str(e)
-                    if "rate_limit" in err_detail.lower() or "429" in err_detail:
-                        st.session_state['err'] = ("Rate limit reached", f"Too many requests. Please wait and try again. Detail: {err_detail[:200]}", "⏳")
+                    if "413" in err_detail or "too large" in err_detail.lower() or "request too large" in err_detail.lower():
+                        st.session_state['err'] = ("Request too large", f"The prompt exceeded the API token limit. Full error: {err_detail[:500]}", "📦")
+                    elif "rate_limit" in err_detail.lower() or "429" in err_detail:
+                        st.session_state['err'] = ("Rate limit reached", f"Too many requests. Please wait and try again. Detail: {err_detail[:500]}", "⏳")
                     elif "timeout" in err_detail.lower():
-                        st.session_state['err'] = ("Request timed out", f"The query took too long. Detail: {err_detail[:200]}", "⏱️")
+                        st.session_state['err'] = ("Request timed out", f"The query took too long. Detail: {err_detail[:500]}", "⏱️")
                     elif "model" in err_detail.lower() or "not found" in err_detail.lower():
-                        st.session_state['err'] = ("Model error", f"Model issue: {err_detail[:300]}", "🔌")
+                        st.session_state['err'] = ("Model error", f"Model issue: {err_detail[:500]}", "🔌")
                     elif "api" in err_detail.lower() or "groq" in err_detail.lower():
-                        st.session_state['err'] = ("Service error", f"API error: {err_detail[:300]}", "🔌")
+                        st.session_state['err'] = ("Service error", f"API error: {err_detail[:500]}", "🔌")
                     else:
-                        st.session_state['err'] = ("Something went wrong", f"Error: {err_detail[:300]}", "⚠️")
+                        st.session_state['err'] = ("Something went wrong", f"Full error: {err_detail}", "⚠️")
 
     # ── SHOW ERROR IF ANY ──
     if st.session_state.get('err'):
