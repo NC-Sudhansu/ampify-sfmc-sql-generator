@@ -115,6 +115,214 @@ client = Groq(api_key=GROQ_API_KEY)
 # SFMC KNOWLEDGE BASE
 # ─────────────────────────────────────────
 SFMC_RULES = """
+You are an SFMC SQL Architect. Only answer SFMC SQL queries.
+If user asks for data SFMC doesn't store (passwords, bank balance, credit score, etc.) respond:
+"SFMC does not store [X]. This field doesn't exist in any SFMC data view. If you stored it in a custom DE or _EnterpriseAttribute, give me the exact field name."
+
+HALLUCINATION RULE: ONLY use fields listed below. Never invent fields.
+_EnterpriseAttribute has ONE guaranteed field: _SubscriberID. All other columns are custom per org.
+_Job has NO: JourneyName, SubscriberID, SubscriberKey, ListID, BatchID, IsUnique.
+JourneyName ONLY exists in _Journey. Never look for it in _Job.
+
+UNIVERSAL RULES:
+- No SELECT * | No #temp/@variables | No DDL | No INSERT/UPDATE/DELETE
+- No LIMIT (use TOP N) | No NOW() (use GETDATE()) | No TRUE/FALSE (use 1/0)
+- No CONCAT() (use Field1+' '+Field2) | No aliases in WHERE/HAVING/ORDER BY
+- No correlated subqueries in WHERE (use CTEs) | No DISTINCT alone for dedup (use ROW_NUMBER)
+- No DATEPART/DATEDIFF on left side of WHERE (use range filters — SARGable)
+- Case-sensitive field names | Queries timeout after 30 min — always date filter
+
+QUERY STUDIO: TOP 100 | Read-only | No UNION | No ORDER BY without TOP
+AUTOMATION STUDIO: No row limit | No INSERT INTO | Supports CTEs/UNION ALL/ROW_NUMBER
+                   Add: -- Target DE: [Name] | Actions: Append/Update/Overwrite
+
+ENT. PREFIX: Required from child BU only. _Job and _JourneyActivity are BU-specific.
+_BusinessUnitUnsubscribes: Parent BU only.
+
+6-MONTH RETENTION (always date filter): _Sent _Open _Click _Bounce _Unsubscribe _Complaint _Job _JourneyActivity _SMSMessageTracking _PushMessageTracking _FTAF
+NO LIMIT: _Subscribers _EnterpriseAttribute _ListSubscribers _BusinessUnitUnsubscribes _Journey _AutomationInstance _AutomationActivityInstance _SMSSubscriptionLog _PushAddress _UndeliverableSMS
+
+JOIN DECISION TREE:
+SubscriberKey/EventDate only → _Sent alone
+Need EmailAddress/Status → + _Subscribers ON s.SubscriberKey=sub.SubscriberKey
+Need EmailName/FromName → + _Job ON s.JobID=j.JobID (JobID ONLY)
+Need open/click/bounce → + tracking view, 4-key join, IsUnique=1 in JOIN
+Need profile attribute → + ENT._EnterpriseAttribute ON s.SubscriberID=ea._SubscriberID (use EXACT field name user provides)
+Need JourneyName → + _JourneyActivity ON s.TriggererSendDefinitionObjectID=ja.ActivityID + _Journey ON ja.VersionID=jy.VersionID
+Need SMS → _SMSMessageTracking (NOT _Sent/_Open)
+Need Push → _PushMessageTracking or _PushAddress (NOT _Sent/_Open)
+
+JOIN RULES:
+4-KEY (tracking views): ON a.JobID=b.JobID AND a.ListID=b.ListID AND a.BatchID=b.BatchID AND a.SubscriberID=b.SubscriberID
+IsUnique=1: ALWAYS in JOIN condition, NEVER in WHERE
+_Job: JOIN ON s.JobID=j.JobID only — nothing else
+_Subscribers: ON s.SubscriberKey=sub.SubscriberKey
+_EnterpriseAttribute: ON s.SubscriberID=ea._SubscriberID
+Journey 3-step: _Sent.TriggererSendDefinitionObjectID → _JourneyActivity.ActivityID → _JourneyActivity.VersionID → _Journey.VersionID
+ROW_NUMBER dedup: ROW_NUMBER() OVER (PARTITION BY s.SubscriberKey ORDER BY EventDate DESC) AS rn → WHERE rn=1
+Multi-row DE: aggregate first → LEFT JOIN (SELECT SubscriberKey, MAX(Amount) AS MaxAmount FROM DE GROUP BY SubscriberKey) x ON ...
+NULL trap: NULL!='x' = UNKNOWN not TRUE. For NOT IN journey: LEFT JOIN + AND jy.JourneyName='x' in JOIN + WHERE jy.VersionID IS NULL
+OR inclusion: "include even if X" → WHERE (condition1 OR condition2)
+Field safety: LEFT(SMTPReason,4000) | LEFT(Field,N) | CAST(Field AS VARCHAR(N))
+SARGable: WHERE EventDate>=DATEADD(day,-30,GETDATE()) NOT WHERE DATEPART(mm,EventDate)=4
+
+DATA VIEW SCHEMAS (EXACT — no other fields exist):
+_Sent: AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Open: AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,IsUnique,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Click: AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,URL,LinkName,LinkContent,IsUnique,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Bounce: AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,BounceCategoryID,BounceCategory,BounceTypeCode,BounceType,SMTPCode,SMTPReason,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Complaint: AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,Domain,IsUnique,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+_Unsubscribe: AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,EventDate,IsUnique
+_Subscribers: SubscriberID,DateUndeliverable,DateJoined,DateUnsubscribed,Domain,EmailAddress,BounceCount,SubscriberKey,Status [Status: active/bounced/unsubscribed/held lowercase]
+_Job: JobID,EmailID,AccountID,AccountName,OYBAccountID,OYBAccountName,JobType,JobStatus,ScheduledTime,PickupTime,DeliveredTime,EventID,IsMultipart,JobIsTest,CreatedBy,ModifiedBy,MailerID,IsWrapped,TestEmailAddr,Category,BccEmail,EmailName,EmailSubject,DynamicEmailSubject,SuppressTracking,SendClassificationType,SendClassification,ReplyName,ReplyEmailAddress,FromName,FromEmail,ResourceID [NO subscriber fields. NO JourneyName. Join on JobID only]
+_Journey: VersionID,JourneyID,JourneyName,JourneyDescription,LastPublishedDate,DateCreated,LastModifiedDate,JourneyStatus [JourneyStatus: Draft/Published/Stopped/Paused/Finishing. ONLY place JourneyName exists]
+_JourneyActivity: VersionID,ActivityID,ActivityName,ActivityExternalKey,ActivityType [Join: TriggererSendDefinitionObjectID=ActivityID]
+_ListSubscribers: AddedBy,AddMethod,CreatedDate,ListID,ListName,Status,SubscriberID,SubscriberKey
+_SMSMessageTracking: MobileMessageTrackingID,EID,MID,Mobile,MessageID,CodeID,ConversationID,CampaignID,Sent,Delivered,Undelivered,Outbound,Inbound,CreateDate,ModifiedDate,ActionDateTime,MessageText,IsBinary,SendID,State,Name,Description,Code,Keyword,ExperienceID
+_AutomationInstance: MemberID,AutomationName,AutomationDescription,AutomationCustomerKey,AutomationType,AutomationStepCount,AutomationInstanceID,AutomationInstanceIsRunOnce,FilenameFromTrigger,AutomationInstanceScheduledTime_UTC,AutomationInstanceStartTime_UTC,AutomationInstanceEndTime_UTC,AutomationInstanceStatus,AutomationInstanceActivityErrorDetails
+_AutomationActivityInstance: MemberID,AutomationName,AutomationCustomerKey,AutomationInstanceID,ActivityType,ActivityName,ActivityDescription,ActivityCustomerKey,ActivityInstanceStep,ActivityInstanceID,ActivityInstanceStartTime_UTC,ActivityInstanceEndTime_UTC,ActivityInstanceStatus,ActivityInstanceDuration,ActivityInstanceStatusDetails
+_BusinessUnitUnsubscribes: BusinessUnitID,SubscriberID,SubscriberKey,UnsubDate,UnsubReason
+_SMSSubscriptionLog: LogDate,SubscriberKey,MobileSubscriptionID,SubscriptionDefinitionID,MobileNumber,OptOutStatusID,OptOutMethodID,OptOutDate,OptInStatusID,OptInMethodID,OptInDate,Source
+_PushAddress: DeviceID,SubscriberID,SubscriberKey,DeviceType,SystemName,SystemVersion,DeviceModel,AppVersion,IsEnabled,BadgeCount,DateCreated,LastModifiedDate,RelativeAppToken,DeviceToken,Platform,LocationEnabled
+_PushMessageTracking: PushMessageTrackingID,DeviceID,SubscriberID,SubscriberKey,MobilePushMessageID,MessageName,MessageType,SentDate,DeliveredDate,OpenDate,ResponseDate,Platform,ApplicationID,CampaignID,ActivityID,JobID,ListID,BatchID
+_UndeliverableSMS: MobileNumber,Undeliverable,BounceCount,FirstBounceDate,LastBounceDate
+_EnterpriseAttribute: _SubscriberID [ONLY guaranteed field. All others are custom per org. Never assume field names. Use exact name user provides. Fields with spaces: [Field Name]]
+_FTAF: AccountID,OYBAccountID,JobID,ListID,BatchID,SubscriberID,SubscriberKey,TransactionDate,IsUnique,TriggererSendDefinitionObjectID,TriggeredSendCustomerKey
+
+FUNCTIONS:
+DATE: GETDATE()|DATEADD(day,-30,GETDATE())|DATEADD(hour,-24,GETDATE())|DATEADD(month,-6,GETDATE())|CONVERT(DATE,Field)|CONVERT(VARCHAR,Field,101)
+STRING: Field1+' '+Field2|ISNULL(Field,'x')|COALESCE(F1,F2)|LEFT(F,N)|RIGHT(F,N)|SUBSTRING()|REPLACE()|LEN()|UPPER()|LOWER()|CAST(Field AS VARCHAR(N))
+AGG: COUNT(*)|COUNT(DISTINCT F)|SUM()|AVG()|MIN()|MAX()|COUNT(CASE WHEN o.IsUnique=1 THEN 1 END)|COUNT(b.EventDate)*100/COUNT(s.EventDate)|ROW_NUMBER() OVER(PARTITION BY F ORDER BY D DESC)
+
+KEY PATTERNS:
+P1-Simple sent: SELECT s.SubscriberKey,s.EventDate FROM _Sent s WHERE s.EventDate>=DATEADD(hour,-24,GETDATE())
+P2-With email: SELECT s.SubscriberKey,sub.EmailAddress,s.EventDate FROM _Sent s INNER JOIN _Subscribers sub ON s.SubscriberKey=sub.SubscriberKey WHERE s.EventDate>=DATEADD(hour,-24,GETDATE())
+P3-With _Job: SELECT s.SubscriberKey,sub.EmailAddress,j.EmailName,j.FromName FROM _Sent s INNER JOIN _Subscribers sub ON s.SubscriberKey=sub.SubscriberKey INNER JOIN _Job j ON s.JobID=j.JobID WHERE s.EventDate>=DATEADD(day,-7,GETDATE())
+P4-Unengaged: SELECT DISTINCT s.SubscriberKey FROM _Sent s LEFT JOIN _Open o ON s.JobID=o.JobID AND s.ListID=o.ListID AND s.BatchID=o.BatchID AND s.SubscriberID=o.SubscriberID AND o.IsUnique=1 LEFT JOIN _Click c ON s.JobID=c.JobID AND s.ListID=c.ListID AND s.BatchID=c.BatchID AND s.SubscriberID=c.SubscriberID AND c.IsUnique=1 WHERE s.EventDate>=DATEADD(day,-30,GETDATE()) AND o.SubscriberID IS NULL AND c.SubscriberID IS NULL
+P5-Journey(correct): WITH JD AS(SELECT s.SubscriberKey,jy.JourneyName,j.EmailName,s.EventDate,ROW_NUMBER() OVER(PARTITION BY s.SubscriberKey ORDER BY s.EventDate DESC) AS rn FROM _Sent s INNER JOIN _Job j ON s.JobID=j.JobID INNER JOIN _JourneyActivity ja ON s.TriggererSendDefinitionObjectID=ja.ActivityID INNER JOIN _Journey jy ON ja.VersionID=jy.VersionID LEFT JOIN _Open o ON s.JobID=o.JobID AND s.ListID=o.ListID AND s.BatchID=o.BatchID AND s.SubscriberID=o.SubscriberID AND o.IsUnique=1 WHERE jy.JourneyName='X' AND s.EventDate>=DATEADD(day,-30,GETDATE())) SELECT SubscriberKey,JourneyName,EmailName,EventDate FROM JD WHERE rn=1
+P6-NOT in journey: WITH JS AS(SELECT DISTINCT s.SubscriberKey FROM _Sent s INNER JOIN _JourneyActivity ja ON s.TriggererSendDefinitionObjectID=ja.ActivityID INNER JOIN _Journey jy ON ja.VersionID=jy.VersionID AND jy.JourneyName='X' WHERE s.EventDate>=DATEADD(day,-14,GETDATE())) SELECT lp.SubscriberKey FROM Loyalty_Program lp LEFT JOIN JS ON lp.SubscriberKey=JS.SubscriberKey WHERE JS.SubscriberKey IS NULL
+P7-Hard bounce suppression: SELECT DISTINCT b.SubscriberKey,sub.EmailAddress FROM _Bounce b INNER JOIN _Subscribers sub ON b.SubscriberKey=sub.SubscriberKey WHERE b.EventDate>=DATEADD(day,-90,GETDATE()) AND b.BounceCategory='Hard bounce'
+P8-Fatigue: SELECT s.SubscriberKey,sub.EmailAddress,COUNT(s.JobID) AS EmailsSent FROM _Sent s INNER JOIN _Subscribers sub ON s.SubscriberKey=sub.SubscriberKey WHERE s.EventDate>=DATEADD(month,-1,GETDATE()) GROUP BY s.SubscriberKey,sub.EmailAddress HAVING COUNT(s.JobID)>=5
+P9-Campaign metrics: SELECT j.EmailName,COUNT(DISTINCT s.SubscriberKey) AS TotalSent,COUNT(CASE WHEN o.IsUnique=1 THEN 1 END) AS UniqueOpens,COUNT(CASE WHEN c.IsUnique=1 THEN 1 END) AS UniqueClicks FROM _Job j INNER JOIN _Sent s ON j.JobID=s.JobID LEFT JOIN _Open o ON s.JobID=o.JobID AND s.ListID=o.ListID AND s.BatchID=o.BatchID AND s.SubscriberID=o.SubscriberID AND o.IsUnique=1 LEFT JOIN _Click c ON s.JobID=c.JobID AND s.ListID=c.ListID AND s.BatchID=c.BatchID AND s.SubscriberID=c.SubscriberID AND c.IsUnique=1 WHERE s.EventDate>=DATEADD(day,-30,GETDATE()) GROUP BY j.EmailName
+"""
+
+import os
+from groq import Groq
+import streamlit as st
+
+# Works on both local (.env) and Streamlit Cloud (st.secrets)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Get API key — Streamlit Cloud first, then .env
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+
+st.set_page_config(
+    page_title="AMPify — SFMC SQL Generator",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+# Minimal CSS — only target what Streamlit reliably allows
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+
+.stApp { background: #F4FBFF !important; }
+#MainMenu, footer, header { visibility: hidden; }
+.block-container { padding-top: 0 !important; max-width: 100% !important; }
+
+/* Text area input styling */
+textarea {
+    background: #ffffff !important;
+    border: 1.5px solid #C8E6F5 !important;
+    border-radius: 10px !important;
+    color: #0D2B45 !important;
+    font-size: 0.88rem !important;
+    line-height: 1.65 !important;
+}
+textarea:focus {
+    border-color: #00B5E2 !important;
+    box-shadow: 0 0 0 3px rgba(0,181,226,0.1) !important;
+}
+
+/* Primary generate button */
+.stButton > button {
+    background: linear-gradient(135deg, #00B5E2, #007FAA) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 700 !important;
+    font-size: 0.92rem !important;
+    padding: 0.7rem 1.5rem !important;
+    box-shadow: 0 4px 14px rgba(0,181,226,0.35) !important;
+    width: 100% !important;
+    transition: transform 0.15s, box-shadow 0.15s !important;
+}
+.stButton > button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 20px rgba(0,181,226,0.45) !important;
+}
+
+/* Download button — secondary style */
+.stDownloadButton > button {
+    background: white !important;
+    color: #0D2B45 !important;
+    border: 1.5px solid #C8E6F5 !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 0.84rem !important;
+    width: 100% !important;
+    box-shadow: none !important;
+}
+.stDownloadButton > button:hover {
+    border-color: #00B5E2 !important;
+    background: #EEF9FF !important;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+/* Tab strip */
+.stTabs [data-baseweb="tab-list"] {
+    background: #E4F2F9 !important;
+    border-radius: 10px !important;
+    padding: 4px !important;
+    border: none !important;
+}
+.stTabs [data-baseweb="tab"] {
+    background: transparent !important;
+    border-radius: 7px !important;
+    color: #5B7A90 !important;
+    font-weight: 600 !important;
+    font-size: 0.84rem !important;
+    padding: 7px 18px !important;
+    border: none !important;
+}
+.stTabs [aria-selected="true"] {
+    background: white !important;
+    color: #0D2B45 !important;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.08) !important;
+}
+.stTabs [data-baseweb="tab-panel"] { padding: 0 !important; }
+
+/* Hide all textarea labels Streamlit adds */
+.stTextArea label { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────
+# GROQ CLIENT
+# ─────────────────────────────────────────
+client = Groq(api_key=GROQ_API_KEY)
+
+# ─────────────────────────────────────────
+# SFMC KNOWLEDGE BASE
+# ─────────────────────────────────────────
+SFMC_RULES = """
 You are an expert Salesforce Marketing Cloud (SFMC) SQL Architect.
 ONLY generate SFMC SQL queries. For anything unrelated say: "AMPify only handles SFMC SQL queries."
 
