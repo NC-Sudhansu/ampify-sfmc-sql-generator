@@ -1766,23 +1766,30 @@ def generate_sfmc_sql(user_request, custom_de_names=""):
 User Request: {user_request}
 {de_context}
 
-IMPORTANT: Respond ONLY using the exact markers below. No text before ---QS_START--- or after ---EXP_END---.
-If this request is not an SFMC SQL query, respond ONLY with:
+You MUST respond using EXACTLY these markers in this exact order.
+Do NOT add any text before the first marker or after the last marker.
+Do NOT wrap SQL in markdown code fences.
+
+If the request is not SFMC-related, respond ONLY with:
 ---INVALID---
-[brief polite reason]
+Brief polite reason here.
 ---INVALID_END---
+
+Otherwise respond with ALL FOUR of these sections:
 
 ---QS_START---
 -- ⚡ QUERY STUDIO VERSION | Test Only | Max 100 Rows
-[sql here]
+[Write the complete Query Studio SQL here with TOP 100]
 ---QS_END---
+
 ---AS_START---
 -- 🚀 AUTOMATION STUDIO VERSION | Production | Full Dataset
--- Target DE: [suggest name]
-[sql here]
+-- Target DE: [SuggestAGoodNameHere]
+[Write the complete Automation Studio SQL here]
 ---AS_END---
+
 ---EXP_START---
-[2-3 plain English sentences: what it does, key logic, any warnings]
+[Write 2-3 plain English sentences explaining: what this query retrieves, which data views are joined and why, and any important warnings the user should know before running it in production.]
 ---EXP_END---"""
 
     resp = model.generate_content(
@@ -1800,12 +1807,15 @@ def parse_response(raw):
     invalid_msg = ""
 
     try:
+        # Strip markdown code fences Gemini sometimes adds
+        raw = raw.replace("```sql", "").replace("```", "").strip()
+
         # Check if AI flagged it as invalid
         if "---INVALID---" in raw:
             invalid_msg = raw.split("---INVALID---")[1].split("---INVALID_END---")[0].strip()
             return "", "", "", invalid_msg
 
-        # Extract markers safely — never fall back to dumping raw
+        # Extract markers safely
         if "---QS_START---" in raw and "---QS_END---" in raw:
             qs = raw.split("---QS_START---")[1].split("---QS_END---")[0].strip()
 
@@ -1815,9 +1825,15 @@ def parse_response(raw):
         if "---EXP_START---" in raw and "---EXP_END---" in raw:
             exp = raw.split("---EXP_START---")[1].split("---EXP_END---")[0].strip()
 
-        # If markers missing entirely, treat as invalid — never dump raw
+        # Clean up any remaining markdown from SQL blocks
+        if qs:
+            qs = qs.replace("```sql", "").replace("```", "").strip()
+        if as_:
+            as_ = as_.replace("```sql", "").replace("```", "").strip()
+
+        # If markers missing entirely — never dump raw
         if not qs and not as_:
-            invalid_msg = "AMPify could not generate a valid SFMC SQL query for this request. Please rephrase your prompt with more specific SFMC context."
+            invalid_msg = "AMPify could not generate a valid SQL query for this request. Please rephrase with more specific SFMC context — e.g. 'subscribers who opened in last 90 days'."
             return "", "", "", invalid_msg
 
     except Exception:
@@ -1830,41 +1846,24 @@ def parse_response(raw):
 def validate(req):
     req = req.strip()
 
-    # Too short
-    if len(req) < 15:
-        return False, "short", "Your prompt is too short. Please describe your SFMC query in more detail — for example: 'Get all subscribers who opened an email in the last 30 days'."
+    # Too short — less than 3 characters
+    if len(req) < 3:
+        return False, "short", "Please describe what SFMC data you need."
 
-    # Too long — prevents rendering issues from massive pasted content
+    # Too long — prevents rendering issues
     if len(req) > 2000:
-        return False, "long", "Your prompt is too long. Please keep it under 2000 characters. Focus on what data you need and from which SFMC data views."
+        return False, "long", "Your prompt is too long. Please keep it under 2000 characters."
 
-    # Clear off-topic keywords
+    # Only block clearly off-topic requests
     off_topic = [
-        "python", "javascript", "typescript", "react", "angular", "vue",
-        "html", "css", "node.js", "django", "flask", "fastapi",
-        "recipe", "cook", "food", "weather", "movie", "film", "song",
-        "java ", "c++", "c#", "ruby", "php", "swift", "kotlin",
-        "write a story", "write a poem", "write an essay",
-        "tell me a joke", "who are you", "what is ai",
-        "openai", "chatgpt", "gemini", "translate",
-        "stock price", "crypto", "bitcoin",
+        "recipe", "cook food", "weather forecast", "write a story",
+        "write a poem", "tell me a joke", "stock price", "crypto price",
+        "bitcoin", "who are you", "what are you",
     ]
     if any(k in req.lower() for k in off_topic):
-        return False, "offtopic", "That prompt doesn't seem to be related to Salesforce Marketing Cloud. AMPify only generates SFMC SQL queries — try describing what subscriber or engagement data you need."
+        return False, "offtopic", "That prompt doesn't seem related to Salesforce Marketing Cloud. AMPify only generates SFMC SQL queries — try describing what subscriber or engagement data you need."
 
-    # Prompts that contain no SFMC-related signal at all
-    sfmc_signals = [
-        "subscriber", "email", "open", "click", "bounce", "send", "sent",
-        "journey", "automation", "data extension", "sfmc", "marketing cloud",
-        "unsubscribe", "campaign", "audience", "segment", "suppression",
-        "list", "contact", "job", "query", "select", "from", "where",
-        "fatigue", "engagement", "re-engage", "lapsed", "active", "status",
-        "deliverability", "hard bounce", "soft bounce", "complaint", "spam",
-        "attribute", "profile", "de ", "data view", "trackinglog"
-    ]
-    if not any(s in req.lower() for s in sfmc_signals):
-        return False, "nosignal", "Your prompt doesn't mention any SFMC concepts. Please describe what Marketing Cloud data you need — for example: 'Subscribers who bounced in the last 90 days' or 'Open rate by email for last month'."
-
+    # Pass everything else to the AI — let the AI decide if it is SFMC-related
     return True, "", ""
 
 
