@@ -1799,7 +1799,10 @@ Otherwise respond with ALL FOUR of these sections:
             max_output_tokens=1500,
         )
     )
-    return resp.text
+    raw = resp.text
+    # Store raw for debugging
+    st.session_state['raw_debug'] = raw[:2000]
+    return raw
 
 
 def parse_response(raw):
@@ -2166,6 +2169,10 @@ with right:
     if st.session_state.get('err'):
         title, message, icon = st.session_state['err']
         show_error(title, message, icon)
+        # Show raw Gemini response for debugging
+        if st.session_state.get('raw_debug'):
+            with st.expander("🔍 Debug: Raw Gemini Response"):
+                st.text(st.session_state['raw_debug'])
 
     # Show results
     if st.session_state.get('qs'):
