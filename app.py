@@ -1,5 +1,5 @@
 import os
-from groq import Groq
+import google.generativeai as genai
 import streamlit as st
 
 # Works on both local (.env) and Streamlit Cloud (st.secrets)
@@ -10,7 +10,7 @@ except ImportError:
     pass
 
 # Get API key — Streamlit Cloud first, then .env
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
 
 st.set_page_config(
     page_title="AMPify — SFMC SQL Generator",
@@ -107,9 +107,10 @@ textarea:focus {
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
-# GROQ CLIENT
+# GEMINI CLIENT
 # ─────────────────────────────────────────
-client = Groq(api_key=GROQ_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 # ─────────────────────────────────────────
 # SFMC KNOWLEDGE BASE
@@ -185,7 +186,7 @@ COUNT(*)|COUNT(DISTINCT F)|ROW_NUMBER() OVER(PARTITION BY F ORDER BY D DESC)|COU
 """
 
 import os
-from groq import Groq
+import google.generativeai as genai
 import streamlit as st
 
 # Works on both local (.env) and Streamlit Cloud (st.secrets)
@@ -196,7 +197,7 @@ except ImportError:
     pass
 
 # Get API key — Streamlit Cloud first, then .env
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
 
 st.set_page_config(
     page_title="AMPify — SFMC SQL Generator",
@@ -293,9 +294,10 @@ textarea:focus {
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
-# GROQ CLIENT
+# GEMINI CLIENT
 # ─────────────────────────────────────────
-client = Groq(api_key=GROQ_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 # ─────────────────────────────────────────
 # SFMC KNOWLEDGE BASE
@@ -393,7 +395,7 @@ P9-Campaign metrics: SELECT j.EmailName,COUNT(DISTINCT s.SubscriberKey) AS Total
 """
 
 import os
-from groq import Groq
+import google.generativeai as genai
 import streamlit as st
 
 # Works on both local (.env) and Streamlit Cloud (st.secrets)
@@ -404,7 +406,7 @@ except ImportError:
     pass
 
 # Get API key — Streamlit Cloud first, then .env
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
 
 st.set_page_config(
     page_title="AMPify — SFMC SQL Generator",
@@ -501,9 +503,10 @@ textarea:focus {
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
-# GROQ CLIENT
+# GEMINI CLIENT
 # ─────────────────────────────────────────
-client = Groq(api_key=GROQ_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 # ─────────────────────────────────────────
 # SFMC KNOWLEDGE BASE
@@ -1006,7 +1009,7 @@ Staging_Purchases | LapsedResponders | Loyalty_Program | Conversions | FatigueLi
 """
 
 import os
-from groq import Groq
+import google.generativeai as genai
 import streamlit as st
 
 # Works on both local (.env) and Streamlit Cloud (st.secrets)
@@ -1017,7 +1020,7 @@ except ImportError:
     pass
 
 # Get API key — Streamlit Cloud first, then .env
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
 
 st.set_page_config(
     page_title="AMPify — SFMC SQL Generator",
@@ -1114,9 +1117,10 @@ textarea:focus {
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
-# GROQ CLIENT
+# GEMINI CLIENT
 # ─────────────────────────────────────────
-client = Groq(api_key=GROQ_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 # ─────────────────────────────────────────
 # SFMC KNOWLEDGE BASE
@@ -1747,7 +1751,7 @@ For Query Studio, always use the LEFT JOIN IS NULL pattern with a CTE.
 # FUNCTIONS
 # ─────────────────────────────────────────
 def generate_sfmc_sql(user_request, custom_de_names=""):
-    # Sanitize inputs — strip excess whitespace, cap lengths
+    # Sanitize inputs
     user_request = user_request.strip()[:2000]
     custom_de_names = custom_de_names.strip()[:500]
 
@@ -1757,7 +1761,9 @@ def generate_sfmc_sql(user_request, custom_de_names=""):
         else "No DE names given — suggest appropriate placeholder names."
     )
 
-    prompt = f"""User Request: {user_request}
+    full_prompt = f"""{SFMC_RULES}
+
+User Request: {user_request}
 {de_context}
 
 IMPORTANT: Respond ONLY using the exact markers below. No text before ---QS_START--- or after ---EXP_END---.
@@ -1779,16 +1785,14 @@ If this request is not an SFMC SQL query, respond ONLY with:
 [2-3 plain English sentences: what it does, key logic, any warnings]
 ---EXP_END---"""
 
-    resp = client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[
-            {"role": "system", "content": SFMC_RULES},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.1,
-        max_tokens=1500
+    resp = model.generate_content(
+        full_prompt,
+        generation_config=genai.GenerationConfig(
+            temperature=0.1,
+            max_output_tokens=1500,
+        )
     )
-    return resp.choices[0].message.content
+    return resp.text
 
 
 def parse_response(raw):
