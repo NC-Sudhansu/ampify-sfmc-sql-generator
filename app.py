@@ -1766,81 +1766,58 @@ def generate_sfmc_sql(user_request, custom_de_names=""):
 User Request: {user_request}
 {de_context}
 
-You MUST respond using EXACTLY these markers in this exact order.
-Do NOT add any text before the first marker or after the last marker.
-Do NOT wrap SQL in markdown code fences.
+Respond ONLY with a valid JSON object in this exact format — no text before or after, no markdown:
+{{
+  "valid": true,
+  "qs": "-- ⚡ QUERY STUDIO VERSION | Test Only | Max 100 Rows\nSELECT TOP 100 ...",
+  "as": "-- 🚀 AUTOMATION STUDIO VERSION | Production | Full Dataset\n-- Target DE: SuggestedName\nSELECT ...",
+  "exp": "2-3 sentences explaining what this query does, which views are joined, and any warnings."
+}}
 
-If the request is not SFMC-related, respond ONLY with:
----INVALID---
-Brief polite reason here.
----INVALID_END---
-
-Otherwise respond with ALL FOUR of these sections:
-
----QS_START---
--- ⚡ QUERY STUDIO VERSION | Test Only | Max 100 Rows
-[Write the complete Query Studio SQL here with TOP 100]
----QS_END---
-
----AS_START---
--- 🚀 AUTOMATION STUDIO VERSION | Production | Full Dataset
--- Target DE: [SuggestAGoodNameHere]
-[Write the complete Automation Studio SQL here]
----AS_END---
-
----EXP_START---
-[Write 2-3 plain English sentences explaining: what this query retrieves, which data views are joined and why, and any important warnings the user should know before running it in production.]
----EXP_END---"""
+If the request is NOT an SFMC SQL query, respond ONLY with:
+{{"valid": false, "reason": "Brief polite explanation why."}}"""
 
     resp = model.generate_content(
         full_prompt,
         generation_config=genai.GenerationConfig(
             temperature=0.1,
-            max_output_tokens=1500,
+            max_output_tokens=3000,
         )
     )
-    raw = resp.text
-    # Store raw for debugging
-    st.session_state['raw_debug'] = raw[:2000]
+    raw = resp.text.strip()
+    st.session_state['raw_debug'] = raw[:3000]
     return raw
 
 
 def parse_response(raw):
+    import json, re
+
     qs = as_ = exp = ""
     invalid_msg = ""
 
     try:
-        # Strip markdown code fences Gemini sometimes adds
-        raw = raw.replace("```sql", "").replace("```", "").strip()
+        # Strip markdown fences Gemini sometimes wraps JSON in
+        raw = raw.strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        raw = raw.strip()
 
-        # Check if AI flagged it as invalid
-        if "---INVALID---" in raw:
-            invalid_msg = raw.split("---INVALID---")[1].split("---INVALID_END---")[0].strip()
+        data = json.loads(raw)
+
+        if not data.get("valid", True):
+            invalid_msg = data.get("reason", "AMPify could not process this request. Please rephrase.")
             return "", "", "", invalid_msg
 
-        # Extract markers safely
-        if "---QS_START---" in raw and "---QS_END---" in raw:
-            qs = raw.split("---QS_START---")[1].split("---QS_END---")[0].strip()
+        qs  = data.get("qs", "").strip()
+        as_ = data.get("as", "").strip()
+        exp = data.get("exp", "").strip()
 
-        if "---AS_START---" in raw and "---AS_END---" in raw:
-            as_ = raw.split("---AS_START---")[1].split("---AS_END---")[0].strip()
-
-        if "---EXP_START---" in raw and "---EXP_END---" in raw:
-            exp = raw.split("---EXP_START---")[1].split("---EXP_END---")[0].strip()
-
-        # Clean up any remaining markdown from SQL blocks
-        if qs:
-            qs = qs.replace("```sql", "").replace("```", "").strip()
-        if as_:
-            as_ = as_.replace("```sql", "").replace("```", "").strip()
-
-        # If markers missing entirely — never dump raw
         if not qs and not as_:
-            invalid_msg = "AMPify could not generate a valid SQL query for this request. Please rephrase with more specific SFMC context — e.g. 'subscribers who opened in last 90 days'."
+            invalid_msg = "AMPify received an incomplete response. Please try again."
             return "", "", "", invalid_msg
 
-    except Exception:
-        invalid_msg = "Something went wrong while generating your query. Please try again."
+    except (json.JSONDecodeError, Exception):
+        invalid_msg = "AMPify received an unexpected response. Please try again."
         return "", "", "", invalid_msg
 
     return qs, as_, exp, ""
